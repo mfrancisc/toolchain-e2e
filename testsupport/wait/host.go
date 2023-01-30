@@ -267,6 +267,27 @@ func (a *HostAwaitility) UpdateSpace(t *testing.T, spaceName string, modifySpace
 	return s, err
 }
 
+// UpdateSpaceBinding tries to update the Spec of the given SpaceBinding
+// If it fails with an error (for example if the object has been modified) then it retrieves the latest version and tries again
+// Returns the updated SpaceBinding
+func (a *HostAwaitility) UpdateSpaceBinding(t *testing.T, spaceBindingName string, modifySpaceBinding func(s *toolchainv1alpha1.SpaceBinding)) (*toolchainv1alpha1.SpaceBinding, error) {
+	var s *toolchainv1alpha1.SpaceBinding
+	err := wait.Poll(a.RetryInterval, a.Timeout, func() (done bool, err error) {
+		freshSpaceBinding := &toolchainv1alpha1.SpaceBinding{}
+		if err := a.Client.Get(context.TODO(), types.NamespacedName{Namespace: a.Namespace, Name: spaceBindingName}, freshSpaceBinding); err != nil {
+			return true, err
+		}
+		modifySpaceBinding(freshSpaceBinding)
+		if err := a.Client.Update(context.TODO(), freshSpaceBinding); err != nil {
+			t.Logf("error updating SpaceBinding '%s': %s. Will retry again...", spaceBindingName, err.Error())
+			return false, nil
+		}
+		s = freshSpaceBinding
+		return true, nil
+	})
+	return s, err
+}
+
 // MasterUserRecordWaitCriterion a struct to compare with an expected MasterUserRecord
 type MasterUserRecordWaitCriterion struct {
 	Match func(*toolchainv1alpha1.MasterUserRecord) bool
@@ -1566,7 +1587,7 @@ func (a *HostAwaitility) GetHostOperatorPod() (corev1.Pod, error) {
 }
 
 // CreateAPIProxyClient creates a client to the appstudio api proxy using the given user token
-func (a *HostAwaitility) CreateAPIProxyClient(t *testing.T, usertoken string) client.Client {
+func (a *HostAwaitility) CreateAPIProxyClient(t *testing.T, usertoken, proxyURL string) (client.Client, error) {
 	apiConfig, err := clientcmd.NewDefaultClientConfigLoadingRules().Load()
 	require.NoError(t, err)
 	defaultConfig, err := clientcmd.NewDefaultClientConfig(*apiConfig, &clientcmd.ConfigOverrides{}).ClientConfig()
@@ -1577,15 +1598,19 @@ func (a *HostAwaitility) CreateAPIProxyClient(t *testing.T, usertoken string) cl
 	require.NoError(t, builder.AddToScheme(s))
 
 	proxyKubeConfig := &rest.Config{
-		Host:            a.APIProxyURL,
+		Host:            proxyURL,
 		TLSClientConfig: defaultConfig.TLSClientConfig,
 		BearerToken:     usertoken,
 	}
-	proxyCl, err := client.New(proxyKubeConfig, client.Options{
-		Scheme: s,
-	})
-	require.NoError(t, err)
-	return proxyCl
+	proxyCl, err := client.New(proxyKubeConfig, client.Options{Scheme: s})
+	if err != nil {
+		return nil, err
+	}
+	return proxyCl, nil
+}
+
+func (a *HostAwaitility) ProxyURLWithWorkspaceContext(workspaceContext string) string {
+	return fmt.Sprintf("%s/workspaces/%s", a.APIProxyURL, workspaceContext)
 }
 
 type SpaceWaitCriterion struct {
